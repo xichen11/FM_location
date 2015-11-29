@@ -38,11 +38,13 @@ if __name__ == "__main__":
     root.withdraw()
 
     folder_name = tkFileDialog.askdirectory(title='Please choose the directory of training files.') + '/'
+    if len(folder_name)==1:
+        print "No file is chosen."
+        sys.exit(0)
     file_names = [ folder_name+f for f in listdir(folder_name) if f.endswith('.dat') ]
     file_names = sorted(file_names)
-    if len(file_names)==0:
-        sys.exit(0)
     print file_names
+
     all_readings = []
     all_labels = []
     num_repeats = 3
