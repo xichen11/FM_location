@@ -1,0 +1,284 @@
+__author__ = "Xi Chen"
+# Create on August 11, 2015
+# Functionality: main file of E-eye, which conducts long-term activity recognition.
+# Configuration parameters:
+# self.mag_upper: the upper bound of the magnitude in the histogram
+# self.num_bins: # of bins in the histogram. Note: self.mag_upper/self.num_bins defines the width of each bin.
+# self.sel_sc: the subcarrier(s) used in the histogram. can be only 1 sc, or a selection of multiple sc
+# self.mov_wind_len: # of packets that are used to generate the histogram
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import time
+import struct
+import os
+from os.path import expanduser
+from matplotlib.lines import Line2D
+import E_eye_profile_read
+import Distances
+import gtk
+import My_Dialog
+
+class E_eye(animation.TimedAnimation):
+	def __init__(self,profile_input,names_input,mov_len_input):
+		self.profiles = profile_input
+		self.profile_names = names_input
+		self.num_profiles = np.shape(self.profiles)[0]
+		# print self.profiles[0][0,0]
+		self.interval = 25 # update interval
+		home_path = expanduser("~")
+		self.file_name_RT = home_path + "/RT_CSI.dat" #
+
+		self.Nsc = 30	# Number of subcarriers
+
+		self.sel_stream = 1 #1-6 mapping to 0-5 when used
+		self.mod_time_new = 0
+		#self.mod_time_old = 0
+		self.mod_time_old = os.stat(self.file_name_RT).st_mtime
+		self.count = 0
+
+		self.num_streams = 6
+		self.num_bins = 100
+		self.mag_upper = 100
+		# self.sel_sc = 0 # 0-29
+		self.sel_sc = range(0,29)
+		self.mov_win_len = mov_len_input
+
+		self.his_Mag = np.zeros(shape=(self.num_streams,self.Nsc,self.mov_win_len),dtype=float)
+		self.pos_histo= np.zeros(shape=(self.num_streams,self.num_bins+1),dtype=float)
+		self.occurrence = np.zeros(shape=(self.num_streams,self.Nsc,self.num_bins),dtype=float)
+		# self.occurrence = np.random.rand(self.num_streams,self.num_bins)
+		for i in xrange(self.num_streams):
+			self.pos_histo[i] = range(0,101,100/self.num_bins)
+
+		self.updateCSI()
+		# self.getHistogram()
+
+		self.t = np.linspace(0, 80, 400)
+
+		fig_mag = plt.figure(figsize=(12,10))
+		fig_mag.canvas.set_window_title('Real-Time Magnitude Monitor')
+		self.ax_mag = [0 for i in xrange(self.num_streams)]
+		self.bars = [0 for i in xrange(self.num_streams)]
+		# print np.size(self.pos_histo)
+		# print np.size(self.occurrence)
+		# for i in range(0,self.num_streams):
+		for i in range(0,self.num_streams):
+			self.ax_mag[i] = fig_mag.add_subplot(2, 3, i+1)
+			temp = self.pos_histo[i]
+			temp_x = np.array(temp[0:-1])
+			# print temp_x
+			temp_y = np.array(self.occurrence[i,0])
+			# print temp_y
+			self.bars[i] = self.ax_mag[i].bar(temp_x,temp_y,width=float(self.mag_upper)/float(self.num_bins))
+			# self.bars[i] = self.ax_mag[i].bar(temp_used,self.occurrence[i])
+			self.ax_mag[i].set_xlim(0, self.mag_upper)
+			self.ax_mag[i].set_ylim(0, 1)
+			self.ax_mag[i].set_title("Stream #"+str(i+1))
+
+		self.showText = 'Measuring...'
+		plt.sca(self.ax_mag[1])
+		self.text_box = plt.text(100*0.5, 1*0.9, self.showText, size=30, rotation=0., ha="center", va="center",
+					 bbox = dict(boxstyle="round",ec=(1., 0.5, 0.5),fc=(1., 0.8, 0.8),))
+
+		plt.subplots_adjust(left=0.5, bottom=0.5)
+
+		plt.tight_layout()
+
+		animation.TimedAnimation.__init__(self, fig_mag, interval=self.interval, blit=True)
+
+
+	def updateCSI(self):
+		########## Begin: Reading file ##########
+		file_CSI = open(self.file_name_RT,"r")
+		file_CSI.seek(0)#2545
+		data_len_binary = file_CSI.read(2)
+		if (len(data_len_binary)==2):
+			# Get the length of one CSI measurement
+			data_len_cells = struct.unpack("2B",data_len_binary)
+			data_len = data_len_cells[0]*256 + data_len_cells[1]
+			data_len_str = "" + str(data_len) + "B"
+
+			# Read the measurement
+			data_binary = file_CSI.read(data_len)
+
+			# Convert it from bytes into int, but it is still a mess
+			data_array = struct.unpack(data_len_str,data_binary)
+
+		file_CSI.close()
+		########## End: Reading file ##########
+
+		########## Begin: Update CSI and other info. ##########
+		if (len(data_len_binary)==2): # check if data_array is updated. If not, the CSI and magnitude stay the same.
+			self.timestamp = data_array[1]+data_array[2]*2**8+data_array[3]*2**16+data_array[4]*2**24 # in milisecond
+			self.bfee_count = data_array[5]+data_array[6]*2**8
+			self.Nrx = data_array[9]
+			self.Ntx = data_array[10]
+			self.RSSI_a = data_array[11]
+			self.RSSI_b = data_array[12]
+			self.RSSI_c = data_array[13]
+			self.noise = data_array[14]-2**8
+			self.agc = data_array[15]
+			self.antenna_sel = data_array[16]
+			self.length = data_array[17]+data_array[18]*2**8
+			self.cal_length = (30 * (self.Nrx * self.Ntx * 8 * 2 + 3) + 7) / 8
+			self.fake_rate_n_flags = data_array[19] + (data_array[20]*2**8)
+			self.CSI_all = data_array[21:len(data_array)+1]
+			self.CSI_real = [[[0 for k in xrange(self.Nrx)] for j in xrange(self.Ntx)] for i in xrange(self.Nsc)]
+			self.CSI_imag = [[[0 for k in xrange(self.Nrx)] for j in xrange(self.Ntx)] for i in xrange(self.Nsc)]
+			self.perm = [0]*3
+
+			if True:
+			# if (self.Ntx>1 and self.noise<-80):
+				self.getCSI()
+				self.getMagnitude()
+				self.getHistogram()
+				self.count = self.count + 1
+				if (self.count>self.mov_win_len):
+					self.activity_recognition()
+					self.count = 0
+			########## End: Update CSI and other info. ##########
+
+	def getHistogram(self):
+		for i in xrange(self.num_streams):
+			for j in xrange(self.Nsc):
+				temp_all = self.his_Mag[i,j]
+				temp1, temp2 = np.histogram(temp_all,self.num_bins,range=(0,self.mag_upper))
+				self.occurrence[i,j,:] = self.occurrence[i,j,:] + temp1
+				self.pos_histo[i,:] = temp2
+		for i in xrange(self.num_streams):
+			for j in xrange(self.Nsc):
+				self.occurrence[i,j,:] = self.occurrence[i,j,:]/sum(self.occurrence[i,j,:])
+
+	# Update CSI related variables
+	def getCSI(self):
+		########## Begin: Get the permutation ##########
+		self.perm[0] = ((self.antenna_sel) & 0x3) +1
+		self.perm[1] = ((self.antenna_sel>>2) & 0x3) +1
+		self.perm[2] = ((self.antenna_sel>>4) & 0x3) +1
+		##########  End: Get the permutation  ##########
+
+		########## Begin: Get the CSI matrices ##########
+		index = 0
+		for i in range(0,self.Nsc):
+			index = index + 3
+			remainder = index % 8
+			for j in range(0,self.Nrx*self.Ntx):
+				tmp1 = self.CSI_all[index/8]
+				tmp2 = self.CSI_all[index/8+1]
+				tmp3 = self.CSI_all[index/8+2]
+				real_dec = tmp1>>remainder | tmp2<<(8-remainder)
+				real_bin = bin(real_dec)[2:]
+				if (len(real_bin)>8):
+					real_bin = real_bin[len(real_bin)-8:]
+				imaginary_dec = tmp2>>remainder | tmp3<<(8-remainder)
+				imaginary_bin = bin(imaginary_dec)[2:]
+				if (len(imaginary_bin)>8):
+					imaginary_bin = imaginary_bin[len(imaginary_bin)-8:]
+				self.CSI_real[i][j%self.Ntx][self.perm[(j/self.Ntx)%self.Nrx]-1]=self.Bin2SignedInt(real_bin)
+				self.CSI_imag[i][j%self.Ntx][self.perm[(j/self.Ntx)%self.Nrx]-1]=self.Bin2SignedInt(imaginary_bin)
+
+				index = index + 16
+
+	# Function: Get Magnitude from CSI matrices
+	def getMagnitude(self):
+		self.CSI_magnitude = [[0 for i in xrange(self.Nsc)] for j in xrange(9)]
+		self.his_Mag = np.roll(self.his_Mag,1,axis=2)
+		# print self.his_Mag[0,0,:]
+		for i in range(0,self.Nsc):
+			for j in range(0,self.Ntx*self.Nrx):
+				tmp_mag = np.sqrt(np.power(self.CSI_real[i][j/3][j%3],2)+np.power(self.CSI_imag[i][j/3][j%3],2))
+				self.CSI_magnitude[j][i] = tmp_mag
+				self.his_Mag[j][i][0] = tmp_mag
+
+	# Function: Convert a string of binary into signed integer
+	def Bin2SignedInt(self,string):
+		length = len(string)
+		if (length<8):
+			return int(string,2)
+		if (string[0]=='0'):
+			ret = int(string,2)
+		else:
+			cmpl_bin = self.BitsComplement(string)
+			ret = int(cmpl_bin,2)-256
+		return ret
+
+	# Function: Find the complement number of a binary
+	def BitsComplement(self,string):
+		length = len(string)
+		for i in range(0,length):
+			if (string[i]=='0'):
+				string[i]=='1'
+			else:
+				string[i]=='0'
+		return string
+
+	# Function: Called each time the plot animation function is activated.
+	def _draw_frame(self, framedata):
+		self.mod_time_new=os.stat(self.file_name_RT).st_mtime
+		if (self.mod_time_new>self.mod_time_old):
+			self.updateCSI()
+			# for i in range(0,self.num_streams):
+			for i in range(0,self.num_streams):
+				temp=np.array(self.occurrence[i,0])
+				[bar.set_height(temp[j]) for j,bar in enumerate(self.bars[i])]
+			self.text_box.set_text(self.showText)
+			self.mod_time_old = self.mod_time_new
+			# print self.count
+		# if (self.count>=self.mov_win_len):
+		# 	self.activity_recognition()
+		# 	self.count = 0
+
+	def new_frame_seq(self):
+		return iter(range(self.t.size))
+
+	def activity_recognition(self):
+		bins1 = self.pos_histo[0]
+		bins2 = self.pos_histo[0]
+		weights1 = self.occurrence
+		min_result = 1000000
+		min_activity = -1
+		for i in xrange(self.num_profiles):
+			weights2 = self.profiles[i]
+
+			# test_euclidean = Distances.dis_euclidean(bins1,bins2,weights1,weights2)
+			# if test_euclidean<min_result:
+			# 	min_result = test_euclidean
+			# 	min_activity = i
+			# # print test_euclidean
+			# # print min_result
+
+			# test_emd = Distances.dis_emd(bins1,bins2,weights1,weights2)
+			# if test_emd<min_result:
+			# 	min_result = test_emd
+			# 	min_activity = i
+			# print test_emd
+			# print min_result
+
+			test_KS = Distances.dis_KS(weights1,weights2)
+			if test_KS<min_result:
+				min_result = test_KS
+				min_activity = i
+			# print test_KS
+		print min_result
+
+		if (min_result>110):
+			# print "Unknown Activities!"
+			self.showText = "Unknown Activities!"
+		else:
+			# print self.profile_names[min_activity]
+			self.showText = self.profile_names[min_activity]
+		# self.showText = self.profile_names[min_activity]
+
+		self.his_Mag = np.zeros(shape=(self.num_streams,self.Nsc,self.mov_win_len),dtype=float)
+		self.pos_histo= np.zeros(shape=(self.num_streams,self.num_bins+1),dtype=float)
+		self.occurrence = np.zeros(shape=(self.num_streams,self.Nsc,self.num_bins),dtype=float)
+
+
+diag = My_Dialog.Dialog()
+mov_len = diag.mov_len
+profiles = E_eye_profile_read.histogram_profile_read()
+ani = E_eye(profiles.all_occurrence,profiles.act_str,mov_len)
+#ani.save('test_sub.mp4')
+plt.show()
